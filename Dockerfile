@@ -17,4 +17,4 @@ ENV HAIRCLIP_BASE_DIR=/app \
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "python setup_models.py && exec uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1"]

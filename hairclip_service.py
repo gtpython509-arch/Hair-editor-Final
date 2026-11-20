@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
+import time
 import uuid
 from argparse import Namespace
 from dataclasses import dataclass
@@ -108,8 +110,10 @@ class HairCLIPConfig:
 # --------------------------------------------------------------------------- Image & Alignment
 
 
-def load_rgb_from_bytes(data: bytes, bg: int = 128) -> Tuple[np.ndarray, bool]:
-    """Load image bytes through PIL, flattening any alpha channel onto neutral gray."""
+def load_rgb_from_bytes(
+    data: bytes, bg: int = 128, max_side: int = 2048
+) -> Tuple[np.ndarray, bool]:
+    """Load image bytes through PIL, flattening alpha onto gray and capping max dimension."""
     im = Image.open(io.BytesIO(data))
     had_alpha = im.mode in ("RGBA", "LA", "P")
     if had_alpha:
@@ -119,6 +123,8 @@ def load_rgb_from_bytes(data: bytes, bg: int = 128) -> Tuple[np.ndarray, bool]:
         im = canvas
     else:
         im = im.convert("RGB")
+    if max_side and max(im.size) > max_side:
+        im.thumbnail((max_side, max_side), Image.LANCZOS)
     return np.array(im), had_alpha
 
 
@@ -492,11 +498,27 @@ class HairCLIPPipeline:
             "report_png": encode_png(strip_bgr, is_rgb=False),
         }
 
+    def cleanup_old_sessions(self, max_age_seconds: int = 3600) -> int:
+        """Remove session directories older than `max_age_seconds` to protect VPS disk space."""
+        now = time.time()
+        removed = 0
+        for entry in self.cfg.work_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            try:
+                if now - entry.stat().st_mtime > max_age_seconds:
+                    shutil.rmtree(entry, ignore_errors=True)
+                    removed += 1
+            except OSError:
+                continue
+        return removed
+
     def invert_person(self, person_bytes: bytes) -> Dict[str, Any]:
         """Align the person photo, invert to W+ latent, and persist a reusable session."""
         import torch
         from torchvision import transforms
 
+        self.cleanup_old_sessions()
         detector, predictor = self._ensure_dlib()
         e4e_net = self._ensure_e4e()
         device = self._resolve_device()
@@ -663,8 +685,12 @@ class HairCLIPPipeline:
         }
 
     def hair_change(self, person_bytes: bytes, **edit_kwargs: Any) -> Dict[str, Any]:
-        """One-shot invert + edit convenience method."""
+        """One-shot invert + edit convenience method (cleans up temporary session files)."""
         inv = self.invert_person(person_bytes)
-        out = self.edit_hair(inv["session_id"], **edit_kwargs)
-        out["person_note"] = inv["note"]
-        return out
+        session_id = inv["session_id"]
+        try:
+            out = self.edit_hair(session_id, **edit_kwargs)
+            out["person_note"] = inv["note"]
+            return out
+        finally:
+            shutil.rmtree(self.cfg.work_dir / session_id, ignore_errors=True)

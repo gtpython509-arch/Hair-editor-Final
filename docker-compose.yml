@@ -1,0 +1,22 @@
+services:
+  hairclip-api:
+    build: .
+    container_name: hairclip-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - HAIRCLIP_BASE_DIR=/app
+      # Uncomment to protect endpoints in production:
+      # - HAIRCLIP_API_KEY=your-secret-key
+      # - HAIRCLIP_CORS_ORIGINS=https://yourdomain.com
+      - HAIRCLIP_MAX_UPLOAD_MB=15
+    volumes:
+      - hairclip_repos:/app/repos
+      - hairclip_weights:/app/weights
+      - clip_cache:/root/.cache/clip
+
+volumes:
+  hairclip_repos:
+  hairclip_weights:
+  clip_cache:

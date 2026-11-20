@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from typing import Literal, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -30,15 +31,42 @@ app = FastAPI(
     description="Production FastAPI wrapper for FFHQ alignment, e4e inversion, and HairCLIP hairstyle transfer.",
 )
 
+_CORS_RAW = os.environ.get("HAIRCLIP_CORS_ORIGINS", "*")
+_CORS_ORIGINS = [o.strip() for o in _CORS_RAW.split(",") if o.strip()] or ["*"]
+_API_KEY = os.environ.get("HAIRCLIP_API_KEY", "").strip()
+_MAX_UPLOAD_BYTES = int(os.environ.get("HAIRCLIP_MAX_UPLOAD_MB", "15")) * 1024 * 1024
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ORIGINS != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 pipeline = HairCLIPPipeline()
+
+
+def _require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> None:
+    if _API_KEY and x_api_key != _API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-API-Key header")
+
+
+async def _read_upload(upload: UploadFile) -> bytes:
+    data = await upload.read()
+    if not data:
+        raise HTTPException(status_code=400, detail=f"Empty file: {upload.filename}")
+    if len(data) > _MAX_UPLOAD_BYTES:
+        mb = _MAX_UPLOAD_BYTES // (1024 * 1024)
+        raise HTTPException(status_code=413, detail=f"File exceeds {mb} MB limit")
+    return data
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    removed = pipeline.cleanup_old_sessions()
+    if removed:
+        logging.getLogger(__name__).info("Cleaned up %d stale sessions", removed)
 
 
 def _handle_service_error(exc: Exception) -> HTTPException:
@@ -121,14 +149,14 @@ def health() -> dict:
     return {"status": "ok" if status["ready"] else "models_missing", **status}
 
 
-@app.post("/api/v1/style/check")
+@app.post("/api/v1/style/check", dependencies=[Depends(_require_api_key)])
 async def check_style(
     style_photo: UploadFile = File(..., description="Portrait photo whose hairstyle you want to transfer"),
     response_format: Literal["json", "png"] = Query("json"),
 ):
     """Validate a style photo (face detection + hair mask fraction) before running full transfer."""
     try:
-        res = pipeline.check_style(await style_photo.read())
+        res = pipeline.check_style(await _read_upload(style_photo))
     except Exception as exc:
         raise _handle_service_error(exc) from exc
 
@@ -146,13 +174,13 @@ async def check_style(
     )
 
 
-@app.post("/api/v1/invert")
+@app.post("/api/v1/invert", dependencies=[Depends(_require_api_key)])
 async def invert_person(
     person_photo: UploadFile = File(..., description="User portrait photo to invert once"),
 ):
     """Align and invert a user photo into a reusable `session_id`."""
     try:
-        res = pipeline.invert_person(await person_photo.read())
+        res = pipeline.invert_person(await _read_upload(person_photo))
     except Exception as exc:
         raise _handle_service_error(exc) from exc
 
@@ -166,7 +194,7 @@ async def invert_person(
     }
 
 
-@app.post("/api/v1/edit")
+@app.post("/api/v1/edit", dependencies=[Depends(_require_api_key)])
 async def edit_hair(
     session_id: str = Form(..., description="Session ID returned by /api/v1/invert"),
     style_photo: Optional[UploadFile] = File(None, description="Optional portrait style photo"),
@@ -181,7 +209,7 @@ async def edit_hair(
 ):
     """Apply a style photo and/or text prompt onto an existing inverted session."""
     try:
-        style_bytes = await style_photo.read() if style_photo is not None else None
+        style_bytes = await _read_upload(style_photo) if style_photo is not None else None
         res = pipeline.edit_hair(
             session_id,
             style_bytes=style_bytes,
@@ -211,7 +239,7 @@ async def edit_hair(
     )
 
 
-@app.post("/api/v1/hair-change")
+@app.post("/api/v1/hair-change", dependencies=[Depends(_require_api_key)])
 async def hair_change(
     user_image: UploadFile = File(..., description="User portrait image"),
     style_image: UploadFile = File(..., description="Style portrait image"),
@@ -219,8 +247,8 @@ async def hair_change(
 ):
     """Transfer the hairstyle from `style_image` onto `user_image`."""
     try:
-        user_bytes = await user_image.read()
-        style_bytes = await style_image.read()
+        user_bytes = await _read_upload(user_image)
+        style_bytes = await _read_upload(style_image)
         res = pipeline.hair_change(
             user_bytes,
             style_bytes=style_bytes,
