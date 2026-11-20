@@ -218,36 +218,70 @@ def _build_blend_mask(
     mode: str,
     dilate: int,
     feather: int,
+    face_protect: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     import torch
 
     if mode == "head":
         m = np.ones((size, size), dtype=np.float32)
-        b = max(feather, 8)
+        b = max(feather, 16)
         m[:b, :] = 0
         m[-b:, :] = 0
         m[:, :b] = 0
         m[:, -b:] = 0
     else:
         m = torch.clamp(mask_new + mask_old, 0, 1)[0, 0].cpu().numpy()
-        m = (m > 0.5).astype(np.uint8)
+        m = (m > 0.45).astype(np.uint8)
         if dilate > 0:
             k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate, dilate))
             m = cv2.dilate(m, k)
         m = m.astype(np.float32)
-    return cv2.GaussianBlur(m, (feather | 1, feather | 1), 0)
+        # Fade smoothly at crop edges to avoid any rectangular warp seam
+        b = max(12, feather // 3)
+        m[:b, :] = 0
+        m[-b:, :] = 0
+        m[:, :b] = 0
+        m[:, -b:] = 0
+    blurred = cv2.GaussianBlur(m, (feather | 1, feather | 1), 0)
+    if face_protect is not None:
+        blurred = blurred * (1.0 - face_protect)
+    return np.clip(blurred, 0.0, 1.0)
+
+
+def _crop_face_protect_mask(
+    crop_bgr: np.ndarray,
+    detector: Any,
+    predictor: Any,
+    size: int,
+) -> Optional[np.ndarray]:
+    """Soft mask protecting eyes, nose, mouth, and lower face inside the 1024x1024 crop."""
+    rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+    lm, _ = find_face(rgb, detector, predictor)
+    if lm is None:
+        return None
+    # Jawline (0..16) + eyebrows (17..26) form the protected inner face
+    face_pts = np.concatenate([lm[0:17], lm[26:16:-1]], axis=0).astype(np.float32)
+    c = face_pts.mean(0)
+    face_pts = (c + (face_pts - c) * 0.94).astype(np.int32)
+    m = np.zeros((size, size), dtype=np.uint8)
+    cv2.fillPoly(m, [cv2.convexHull(face_pts)], 255)
+    return cv2.GaussianBlur(m.astype(np.float32) / 255.0, (0, 0), 9.0)
 
 
 def _match_color(src: np.ndarray, ref: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Match lighting and skin tone in LAB space using the non-hair region."""
     sel = mask < 0.1
     if sel.sum() < 1000:
         return src
-    out = src.copy()
+    src_lab = cv2.cvtColor(np.clip(src, 0, 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+    ref_lab = cv2.cvtColor(np.clip(ref, 0, 255).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
     for c in range(3):
-        s_vals, r_vals = src[..., c][sel], ref[..., c][sel]
+        s_vals, r_vals = src_lab[..., c][sel], ref_lab[..., c][sel]
         sd = s_vals.std() if s_vals.std() > 1e-5 else 1.0
-        out[..., c] = (src[..., c] - s_vals.mean()) * (r_vals.std() / sd) + r_vals.mean()
-    return np.clip(out, 0, 255)
+        scale = float(np.clip(r_vals.std() / sd, 0.7, 1.4))
+        src_lab[..., c] = (src_lab[..., c] - s_vals.mean()) * scale + r_vals.mean()
+    out_rgb = cv2.cvtColor(np.clip(src_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return out_rgb.astype(np.float32)
 
 
 def _slug(text: str) -> str:
@@ -573,10 +607,10 @@ class HairCLIPPipeline:
         style_bytes: Optional[bytes] = None,
         hair_text: str = "",
         color_text: str = "",
-        strength: float = 0.10,
+        strength: float = 0.18,
         mode: str = "hair",
-        dilate: int = 25,
-        feather: int = 41,
+        dilate: int = 15,
+        feather: int = 31,
         color_match: bool = True,
     ) -> Dict[str, Any]:
         """Apply a style photo and/or text hairstyle/color onto an inverted session."""
@@ -628,11 +662,13 @@ class HairCLIPPipeline:
                 color_tok = clip_mod.tokenize([color_text.strip()]).to(device)
 
         w = torch.load(str(session_dir / "w.pt"), map_location="cpu").to(device).float()
-        aligned_pil = Image.open(str(session_dir / "aligned_person.png")).convert("RGB")
+        aligned_bgr = cv2.imread(str(session_dir / "aligned_person.png"), cv2.IMREAD_COLOR)
+        aligned_pil = Image.fromarray(cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2RGB))
         aligned_rgb = np.array(aligned_pil).astype(np.float32)
+        color_tensor = hair_tensor if (style_bytes and not color_text.strip()) else none_t
         with torch.no_grad():
             mask_old = avg_lab.gen_hair_mask(tf(aligned_pil).unsqueeze(0).to(device))
-            w_hat = w + float(strength) * mapper_net.mapper(w, hair_tok, color_tok, hair_tensor, none_t)
+            w_hat = w + float(strength) * mapper_net.mapper(w, hair_tok, color_tok, hair_tensor, color_tensor)
             x_hat, _ = mapper_net.decoder(
                 [w_hat],
                 input_is_latent=True,
@@ -658,7 +694,11 @@ class HairCLIPPipeline:
             orig_rgb = cv2.cvtColor(orig_bgr, cv2.COLOR_BGR2RGB).astype(np.float32)
             oh, ow = orig_rgb.shape[:2]
 
-            blend_m = _build_blend_mask(mask_new, mask_old, size=size, mode=mode, dilate=dilate, feather=feather)
+            detector, predictor = self._ensure_dlib()
+            face_prot = _crop_face_protect_mask(aligned_bgr, detector, predictor, size) if mode == "hair" else None
+            blend_m = _build_blend_mask(
+                mask_new, mask_old, size=size, mode=mode, dilate=dilate, feather=feather, face_protect=face_prot
+            )
             src = _match_color(res_rgb, aligned_rgb, blend_m) if color_match else res_rgb
             warped = cv2.warpPerspective(
                 src.astype(np.uint8), m_inv, (ow, oh), flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_CONSTANT
