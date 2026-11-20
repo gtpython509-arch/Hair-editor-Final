@@ -88,66 +88,135 @@ _HOME_HTML = """<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>HairCLIP v3 API</title>
+  <title>Hair &amp; Cloth Editor</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 820px; margin: 32px auto; padding: 0 16px; background: #0f172a; color: #f8fafc; }
-    .card { background: #1e293b; border-radius: 10px; padding: 18px; margin-bottom: 16px; }
-    a { color: #60a5fa; }
-    .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
-    label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #cbd5e1; }
-    input, button { padding: 8px 10px; border-radius: 6px; border: 1px solid #334155; background: #0f172a; color: #f8fafc; }
-    button { background: #2563eb; border-color: #2563eb; cursor: pointer; font-weight: 600; padding: 10px 18px; }
-    img { max-width: 100%; border-radius: 8px; margin-top: 12px; }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 620px; margin: 48px auto; padding: 0 20px; background: #ffffff; color: #111827; }
+    h1 { font-size: 28px; font-weight: 700; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .sub { color: #4b5563; font-size: 14px; margin: 0 0 22px; }
+    .dropzone { display: block; border: 1.5px dashed #9ca3af; border-radius: 8px; padding: 26px 16px; text-align: center; background: #f9fafb; cursor: pointer; transition: border-color .15s, background .15s; margin-bottom: 12px; }
+    .dropzone.dragover { border-color: #2563eb; background: #eff6ff; }
+    .dropzone input { display: none; }
+    .dropzone .link { text-decoration: underline; font-weight: 600; color: #111827; }
+    .dropzone .hint { font-size: 13px; color: #4b5563; }
+    .dropzone .fname { margin-top: 8px; font-size: 12px; color: #2563eb; font-weight: 500; }
+    .opt-row { display: flex; align-items: center; gap: 8px; margin: 10px 0; font-size: 14px; font-weight: 500; cursor: pointer; }
+    .opt-row input[type="checkbox"] { width: 16px; height: 16px; accent-color: #2563eb; cursor: pointer; }
+    .opt-row span.note { color: #6b7280; font-weight: 400; font-size: 13px; }
+    .panel { display: none; margin: 6px 0 12px 24px; }
+    .panel.open { display: block; }
+    select { width: 100%; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; background: #fff; color: #111827; margin-bottom: 8px; }
+    button.primary { width: 100%; padding: 12px 16px; border: 1px solid #9ca3af; border-radius: 6px; background: #e5e7eb; color: #111827; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px; }
+    button.primary:hover:not(:disabled) { background: #d1d5db; }
+    button.primary:disabled { opacity: 0.6; cursor: wait; }
+    #msg { font-size: 13px; color: #4b5563; margin: 12px 0 0; min-height: 18px; }
+    #outWrap { display: none; margin-top: 18px; }
+    #out { width: 100%; border-radius: 8px; border: 1px solid #e5e7eb; }
+    .dl { display: inline-block; margin-top: 8px; font-size: 13px; color: #2563eb; text-decoration: none; font-weight: 500; }
   </style>
 </head>
 <body>
-  <h2>Hair &amp; Cloth Editor API</h2>
-  <div class="card">
-    <p>Swagger Docs: <a href="/docs">/docs</a> &nbsp;|&nbsp; Health: <a href="/health">/health</a></p>
-    <p id="healthStatus" style="font-size:13px;color:#94a3b8">Checking model status...</p>
+  <h1>Hair &amp; Cloth Editor</h1>
+  <p class="sub">Upload your photo to change hairstyle, outfit, or both in one place.</p>
+
+  <label class="dropzone" id="userZone">
+    <input id="userImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
+    <span class="link">Choose a photo</span> <span class="hint">or drag &amp; drop here (.jpg, .png, .webp)</span>
+    <div class="fname" id="userName"></div>
+  </label>
+
+  <label class="opt-row">
+    <input type="checkbox" id="chkHair" checked />
+    <span>Change Hair Style <span class="note">(Upload a hairstyle reference photo)</span></span>
+  </label>
+  <div class="panel open" id="hairPanel">
+    <label class="dropzone" id="styleZone">
+      <input id="styleImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
+      <span class="link">Choose a hair style photo</span> <span class="hint">or drag &amp; drop here</span>
+      <div class="fname" id="styleName"></div>
+    </label>
   </div>
-  <div class="card">
-    <h3>Unified Editor (<code>POST /api/v1/try-on</code>)</h3>
-    <p style="font-size:13px;color:#94a3b8;margin-top:0">Upload <b>User Image</b> plus either <b>Style Image</b> (hair), <b>Cloth Image</b> (outfit), or <b>both</b>.</p>
-    <div class="row">
-      <label>User Image (required) <input id="userImg" type="file" accept="image/*" /></label>
-      <label>Hair Style Image (optional) <input id="styleImg" type="file" accept="image/*" /></label>
-      <label>Cloth Image (optional) <input id="clothImg" type="file" accept="image/*" /></label>
-      <label>Cloth Category
-        <select id="clothCat" style="padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#f8fafc">
-          <option value="tops">tops</option>
-          <option value="bottoms">bottoms</option>
-          <option value="one-pieces">one-pieces</option>
-        </select>
-      </label>
-      <button id="go">Apply Changes</button>
-    </div>
-    <p id="msg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
-    <img id="out" />
+
+  <label class="opt-row">
+    <input type="checkbox" id="chkCloth" />
+    <span>Change Cloth / Outfit <span class="note">(Upload a garment photo)</span></span>
+  </label>
+  <div class="panel" id="clothPanel">
+    <label class="dropzone" id="clothZone">
+      <input id="clothImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
+      <span class="link">Choose a cloth photo</span> <span class="hint">or drag &amp; drop here</span>
+      <div class="fname" id="clothName"></div>
+    </label>
+    <select id="clothCat">
+      <option value="tops">Category: Tops</option>
+      <option value="bottoms">Category: Bottoms</option>
+      <option value="one-pieces">Category: One-Pieces</option>
+    </select>
   </div>
+
+  <button class="primary" id="go">Apply Changes</button>
+  <p id="msg"></p>
+  <div id="outWrap">
+    <img id="out" alt="Result" />
+    <a id="dlLink" class="dl" download="result.png">Download result.png</a>
+  </div>
+
   <script>
-    fetch('/health').then(r => r.json()).then(d => {
-      document.getElementById('healthStatus').textContent =
-        'Hair model: ' + (d.hair?.ready ? 'ready' : 'not installed') +
-        ' | Cloth model: ' + (d.cloth?.ready ? 'ready' : 'not installed');
-    });
+    function bindDropzone(zoneId, inputId, nameId) {
+      const zone = document.getElementById(zoneId);
+      const inp = document.getElementById(inputId);
+      const lbl = document.getElementById(nameId);
+      const update = () => { lbl.textContent = inp.files[0] ? inp.files[0].name : ''; };
+      inp.addEventListener('change', update);
+      zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+      zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+      zone.addEventListener('drop', e => {
+        e.preventDefault();
+        zone.classList.remove('dragover');
+        if (e.dataTransfer.files.length) { inp.files = e.dataTransfer.files; update(); }
+      });
+    }
+    bindDropzone('userZone', 'userImg', 'userName');
+    bindDropzone('styleZone', 'styleImg', 'styleName');
+    bindDropzone('clothZone', 'clothImg', 'clothName');
+
+    const chkHair = document.getElementById('chkHair');
+    const chkCloth = document.getElementById('chkCloth');
+    chkHair.onchange = () => document.getElementById('hairPanel').classList.toggle('open', chkHair.checked);
+    chkCloth.onchange = () => document.getElementById('clothPanel').classList.toggle('open', chkCloth.checked);
+
     document.getElementById('go').onclick = async () => {
-      const u = document.getElementById('userImg').files[0];
-      const s = document.getElementById('styleImg').files[0];
-      const c = document.getElementById('clothImg').files[0];
+      const btn = document.getElementById('go');
       const msg = document.getElementById('msg');
-      if (!u) { msg.textContent = 'Select a User Image first.'; return; }
-      if (!s && !c) { msg.textContent = 'Select a Hair Style Image, a Cloth Image, or both.'; return; }
+      const u = document.getElementById('userImg').files[0];
+      const s = chkHair.checked ? document.getElementById('styleImg').files[0] : null;
+      const c = chkCloth.checked ? document.getElementById('clothImg').files[0] : null;
+      if (!u) { msg.textContent = 'Please choose your photo first.'; return; }
+      if (!s && !c) { msg.textContent = 'Select at least one option (Hair Style or Cloth) and upload its photo.'; return; }
+
       const fd = new FormData();
       fd.append('user_image', u);
       if (s) fd.append('style_image', s);
       if (c) fd.append('cloth_image', c);
       fd.append('category', document.getElementById('clothCat').value);
-      msg.textContent = 'Processing... (CPU may take 1-3 min)';
-      const r = await fetch('/api/v1/try-on?response_format=png', { method: 'POST', body: fd });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
-      document.getElementById('out').src = URL.createObjectURL(await r.blob());
-      msg.textContent = 'Done.';
+
+      btn.disabled = true;
+      msg.textContent = 'Processing... (CPU may take 1-3 minutes)';
+      try {
+        const r = await fetch('/api/v1/try-on?response_format=png', { method: 'POST', body: fd });
+        if (!r.ok) {
+          const e = await r.json().catch(() => ({}));
+          msg.textContent = 'Error: ' + (e.detail || r.status);
+          return;
+        }
+        const url = URL.createObjectURL(await r.blob());
+        document.getElementById('out').src = url;
+        document.getElementById('dlLink').href = url;
+        document.getElementById('outWrap').style.display = 'block';
+        msg.textContent = 'Done.';
+      } finally {
+        btn.disabled = false;
+      }
     };
   </script>
 </body>
@@ -336,53 +405,5 @@ async def cloth_change(
             "category": res["category"],
             "garment_photo_type": res["garment_photo_type"],
             "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
-        }
-    )
-
-
-@app.post("/api/v1/try-on", dependencies=[Depends(_require_api_key)])
-async def unified_try_on(
-    user_image: UploadFile = File(..., description="User portrait/full-body image"),
-    style_image: Optional[UploadFile] = File(None, description="Optional hairstyle reference image"),
-    cloth_image: Optional[UploadFile] = File(None, description="Optional garment image"),
-    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
-    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
-    response_format: Literal["png", "json"] = Query("png"),
-):
-    """Unified endpoint: change hair only, cloth only, or both on the same user image."""
-    if style_image is None and cloth_image is None:
-        raise HTTPException(status_code=400, detail="Provide style_image, cloth_image, or both.")
-
-    try:
-        current_bytes = await _read_upload(user_image)
-        applied = []
-
-        if style_image is not None:
-            cloth_pipeline.unload()
-            style_bytes = await _read_upload(style_image)
-            hair_res = pipeline.hair_change(current_bytes, style_bytes=style_bytes)
-            current_bytes = hair_res["result_png"]
-            applied.append("hair")
-
-        if cloth_image is not None:
-            pipeline.unload()
-            cloth_bytes = await _read_upload(cloth_image)
-            cloth_res = cloth_pipeline.try_on(
-                current_bytes,
-                cloth_bytes,
-                category=category,
-                garment_photo_type=garment_photo_type,
-            )
-            current_bytes = cloth_res["result_png"]
-            applied.append("cloth")
-    except Exception as exc:
-        raise _handle_service_error(exc) from exc
-
-    if response_format == "png":
-        return Response(content=current_bytes, media_type="image/png")
-    return JSONResponse(
-        {
-            "applied": applied,
-            "result_png_b64": base64.b64encode(current_bytes).decode("ascii"),
         }
     )
