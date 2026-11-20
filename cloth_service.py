@@ -6,6 +6,7 @@ thread-safe inference, and automatic image normalization.
 
 from __future__ import annotations
 
+import gc
 import io
 import logging
 import os
@@ -69,6 +70,12 @@ class ClothTryOnPipeline:
         self.cfg = config or ClothTryOnConfig.from_env()
         self._lock = threading.RLock()
         self._pipeline: Any = None
+
+    def unload(self) -> None:
+        """Release loaded FASHN VTON pipeline from memory to free RAM."""
+        with self._lock:
+            self._pipeline = None
+            gc.collect()
 
     def readiness(self) -> Dict[str, Any]:
         missing = []

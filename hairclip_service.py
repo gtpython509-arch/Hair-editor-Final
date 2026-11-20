@@ -6,6 +6,7 @@ and HairCLIPMapper hairstyle/color transfer without notebook or Colab globals.
 
 from __future__ import annotations
 
+import gc
 import io
 import json
 import logging
@@ -305,6 +306,17 @@ class HairCLIPPipeline:
         self._e4e_net: Any = None
         self._mapper_net: Any = None
         self._clip_mod: Any = None
+
+    def unload(self) -> None:
+        """Release loaded HairCLIP/e4e models from memory to free RAM."""
+        with self._lock:
+            self._detector = None
+            self._predictor = None
+            self._avg_lab = None
+            self._e4e_net = None
+            self._mapper_net = None
+            self._clip_mod = None
+            gc.collect()
 
     @staticmethod
     def _patch_compat() -> None:

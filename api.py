@@ -292,6 +292,7 @@ async def hair_change(
 ):
     """Transfer the hairstyle from `style_image` onto `user_image`."""
     try:
+        cloth_pipeline.unload()
         user_bytes = await _read_upload(user_image)
         style_bytes = await _read_upload(style_image)
         res = pipeline.hair_change(
@@ -329,6 +330,7 @@ async def cloth_change(
 ):
     """Virtual try-on: render `user_image` wearing `cloth_image` using FASHN VTON v1.5."""
     try:
+        pipeline.unload()
         user_bytes = await _read_upload(user_image)
         cloth_bytes = await _read_upload(cloth_image)
         res = cloth_pipeline.try_on(
