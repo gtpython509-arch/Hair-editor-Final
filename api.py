@@ -101,37 +101,29 @@ _HOME_HTML = """<!doctype html>
   </style>
 </head>
 <body>
-  <h2>HairCLIP v3 Hair Change API</h2>
+  <h2>Hair &amp; Cloth Editor API</h2>
   <div class="card">
     <p>Swagger Docs: <a href="/docs">/docs</a> &nbsp;|&nbsp; Health: <a href="/health">/health</a></p>
     <p id="healthStatus" style="font-size:13px;color:#94a3b8">Checking model status...</p>
   </div>
   <div class="card">
-    <h3>1. Hair Change (<code>POST /api/v1/hair-change</code>)</h3>
+    <h3>Unified Editor (<code>POST /api/v1/try-on</code>)</h3>
+    <p style="font-size:13px;color:#94a3b8;margin-top:0">Upload <b>User Image</b> plus either <b>Style Image</b> (hair), <b>Cloth Image</b> (outfit), or <b>both</b>.</p>
     <div class="row">
-      <label>User Image <input id="userImg" type="file" accept="image/*" /></label>
-      <label>Style Image <input id="styleImg" type="file" accept="image/*" /></label>
-      <button id="go">Run Hair Change</button>
-    </div>
-    <p id="msg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
-    <img id="out" />
-  </div>
-  <div class="card">
-    <h3>2. Cloth Change (<code>POST /api/v1/cloth-change</code>)</h3>
-    <div class="row">
-      <label>User Image <input id="clothUserImg" type="file" accept="image/*" /></label>
-      <label>Cloth Image <input id="clothImg" type="file" accept="image/*" /></label>
-      <label>Category
+      <label>User Image (required) <input id="userImg" type="file" accept="image/*" /></label>
+      <label>Hair Style Image (optional) <input id="styleImg" type="file" accept="image/*" /></label>
+      <label>Cloth Image (optional) <input id="clothImg" type="file" accept="image/*" /></label>
+      <label>Cloth Category
         <select id="clothCat" style="padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#f8fafc">
           <option value="tops">tops</option>
           <option value="bottoms">bottoms</option>
           <option value="one-pieces">one-pieces</option>
         </select>
       </label>
-      <button id="goCloth">Run Cloth Change</button>
+      <button id="go">Apply Changes</button>
     </div>
-    <p id="clothMsg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
-    <img id="clothOut" />
+    <p id="msg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
+    <img id="out" />
   </div>
   <script>
     fetch('/health').then(r => r.json()).then(d => {
@@ -142,30 +134,19 @@ _HOME_HTML = """<!doctype html>
     document.getElementById('go').onclick = async () => {
       const u = document.getElementById('userImg').files[0];
       const s = document.getElementById('styleImg').files[0];
+      const c = document.getElementById('clothImg').files[0];
       const msg = document.getElementById('msg');
-      if (!u || !s) { msg.textContent = 'Select both User Image and Style Image.'; return; }
+      if (!u) { msg.textContent = 'Select a User Image first.'; return; }
+      if (!s && !c) { msg.textContent = 'Select a Hair Style Image, a Cloth Image, or both.'; return; }
       const fd = new FormData();
       fd.append('user_image', u);
-      fd.append('style_image', s);
-      msg.textContent = 'Running hair change...';
-      const r = await fetch('/api/v1/hair-change?response_format=png', { method: 'POST', body: fd });
+      if (s) fd.append('style_image', s);
+      if (c) fd.append('cloth_image', c);
+      fd.append('category', document.getElementById('clothCat').value);
+      msg.textContent = 'Processing... (CPU may take 1-3 min)';
+      const r = await fetch('/api/v1/try-on?response_format=png', { method: 'POST', body: fd });
       if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
       document.getElementById('out').src = URL.createObjectURL(await r.blob());
-      msg.textContent = 'Done.';
-    };
-    document.getElementById('goCloth').onclick = async () => {
-      const u = document.getElementById('clothUserImg').files[0];
-      const c = document.getElementById('clothImg').files[0];
-      const msg = document.getElementById('clothMsg');
-      if (!u || !c) { msg.textContent = 'Select both User Image and Cloth Image.'; return; }
-      const fd = new FormData();
-      fd.append('user_image', u);
-      fd.append('cloth_image', c);
-      fd.append('category', document.getElementById('clothCat').value);
-      msg.textContent = 'Running cloth change (CPU may take 1-3 min)...';
-      const r = await fetch('/api/v1/cloth-change?response_format=png', { method: 'POST', body: fd });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
-      document.getElementById('clothOut').src = URL.createObjectURL(await r.blob());
       msg.textContent = 'Done.';
     };
   </script>
@@ -355,5 +336,53 @@ async def cloth_change(
             "category": res["category"],
             "garment_photo_type": res["garment_photo_type"],
             "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
+        }
+    )
+
+
+@app.post("/api/v1/try-on", dependencies=[Depends(_require_api_key)])
+async def unified_try_on(
+    user_image: UploadFile = File(..., description="User portrait/full-body image"),
+    style_image: Optional[UploadFile] = File(None, description="Optional hairstyle reference image"),
+    cloth_image: Optional[UploadFile] = File(None, description="Optional garment image"),
+    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
+    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
+    response_format: Literal["png", "json"] = Query("png"),
+):
+    """Unified endpoint: change hair only, cloth only, or both on the same user image."""
+    if style_image is None and cloth_image is None:
+        raise HTTPException(status_code=400, detail="Provide style_image, cloth_image, or both.")
+
+    try:
+        current_bytes = await _read_upload(user_image)
+        applied = []
+
+        if style_image is not None:
+            cloth_pipeline.unload()
+            style_bytes = await _read_upload(style_image)
+            hair_res = pipeline.hair_change(current_bytes, style_bytes=style_bytes)
+            current_bytes = hair_res["result_png"]
+            applied.append("hair")
+
+        if cloth_image is not None:
+            pipeline.unload()
+            cloth_bytes = await _read_upload(cloth_image)
+            cloth_res = cloth_pipeline.try_on(
+                current_bytes,
+                cloth_bytes,
+                category=category,
+                garment_photo_type=garment_photo_type,
+            )
+            current_bytes = cloth_res["result_png"]
+            applied.append("cloth")
+    except Exception as exc:
+        raise _handle_service_error(exc) from exc
+
+    if response_format == "png":
+        return Response(content=current_bytes, media_type="image/png")
+    return JSONResponse(
+        {
+            "applied": applied,
+            "result_png_b64": base64.b64encode(current_bytes).decode("ascii"),
         }
     )
