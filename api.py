@@ -117,36 +117,30 @@ _HOME_HTML = """<!doctype html>
 </head>
 <body>
   <h1>Hair &amp; Cloth Editor</h1>
-  <p class="sub">Upload your photo to change hairstyle, outfit, or both in one place.</p>
+  <p class="sub">Upload your photo and one reference photo, then choose to change hair, cloth, or both.</p>
 
   <label class="dropzone" id="userZone">
     <input id="userImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
-    <span class="link">Choose a photo</span> <span class="hint">or drag &amp; drop here (.jpg, .png, .webp)</span>
+    <span class="link">Choose your photo</span> <span class="hint">or drag &amp; drop here (.jpg, .png, .webp)</span>
     <div class="fname" id="userName"></div>
+  </label>
+
+  <label class="dropzone" id="refZone">
+    <input id="refImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
+    <span class="link">Choose reference photo</span> <span class="hint">for hair style / outfit (.jpg, .png, .webp)</span>
+    <div class="fname" id="refName"></div>
   </label>
 
   <label class="opt-row">
     <input type="checkbox" id="chkHair" checked />
-    <span>Change Hair Style <span class="note">(Upload a hairstyle reference photo)</span></span>
+    <span>Change Hair Style <span class="note">(from reference photo)</span></span>
   </label>
-  <div class="panel open" id="hairPanel">
-    <label class="dropzone" id="styleZone">
-      <input id="styleImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
-      <span class="link">Choose a hair style photo</span> <span class="hint">or drag &amp; drop here</span>
-      <div class="fname" id="styleName"></div>
-    </label>
-  </div>
 
   <label class="opt-row">
     <input type="checkbox" id="chkCloth" />
-    <span>Change Cloth / Outfit <span class="note">(Upload a garment photo)</span></span>
+    <span>Change Cloth / Outfit <span class="note">(from reference photo)</span></span>
   </label>
   <div class="panel" id="clothPanel">
-    <label class="dropzone" id="clothZone">
-      <input id="clothImg" type="file" accept=".jpg,.jpeg,.png,.webp,image/*" />
-      <span class="link">Choose a cloth photo</span> <span class="hint">or drag &amp; drop here</span>
-      <div class="fname" id="clothName"></div>
-    </label>
     <select id="clothCat">
       <option value="tops">Category: Tops</option>
       <option value="bottoms">Category: Bottoms</option>
@@ -177,27 +171,28 @@ _HOME_HTML = """<!doctype html>
       });
     }
     bindDropzone('userZone', 'userImg', 'userName');
-    bindDropzone('styleZone', 'styleImg', 'styleName');
-    bindDropzone('clothZone', 'clothImg', 'clothName');
+    bindDropzone('refZone', 'refImg', 'refName');
 
     const chkHair = document.getElementById('chkHair');
     const chkCloth = document.getElementById('chkCloth');
-    chkHair.onchange = () => document.getElementById('hairPanel').classList.toggle('open', chkHair.checked);
     chkCloth.onchange = () => document.getElementById('clothPanel').classList.toggle('open', chkCloth.checked);
 
     document.getElementById('go').onclick = async () => {
       const btn = document.getElementById('go');
       const msg = document.getElementById('msg');
       const u = document.getElementById('userImg').files[0];
-      const s = chkHair.checked ? document.getElementById('styleImg').files[0] : null;
-      const c = chkCloth.checked ? document.getElementById('clothImg').files[0] : null;
+      const ref = document.getElementById('refImg').files[0];
+      const doHair = chkHair.checked;
+      const doCloth = chkCloth.checked;
       if (!u) { msg.textContent = 'Please choose your photo first.'; return; }
-      if (!s && !c) { msg.textContent = 'Select at least one option (Hair Style or Cloth) and upload its photo.'; return; }
+      if (!ref) { msg.textContent = 'Please choose a reference photo.'; return; }
+      if (!doHair && !doCloth) { msg.textContent = 'Select at least one option (Change Hair Style or Change Cloth).'; return; }
 
       const fd = new FormData();
       fd.append('user_image', u);
-      if (s) fd.append('style_image', s);
-      if (c) fd.append('cloth_image', c);
+      fd.append('reference_image', ref);
+      fd.append('change_hair', doHair);
+      fd.append('change_cloth', doCloth);
       fd.append('category', document.getElementById('clothCat').value);
 
       btn.disabled = true;
@@ -405,5 +400,61 @@ async def cloth_change(
             "category": res["category"],
             "garment_photo_type": res["garment_photo_type"],
             "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
+        }
+    )
+
+
+@app.post("/api/v1/try-on", dependencies=[Depends(_require_api_key)])
+async def unified_try_on(
+    user_image: UploadFile = File(..., description="User portrait/full-body image"),
+    reference_image: Optional[UploadFile] = File(None, description="Single reference image for hair and/or cloth"),
+    style_image: Optional[UploadFile] = File(None, description="Optional separate hairstyle reference image"),
+    cloth_image: Optional[UploadFile] = File(None, description="Optional separate garment image"),
+    change_hair: bool = Form(True, description="Apply hair change"),
+    change_cloth: bool = Form(False, description="Apply cloth change"),
+    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
+    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
+    response_format: Literal["png", "json"] = Query("png"),
+):
+    """Unified endpoint: change hair only, cloth only, or both from one reference image."""
+    hair_upload = style_image or (reference_image if change_hair else None)
+    cloth_upload = cloth_image or (reference_image if change_cloth else None)
+    if not hair_upload and not cloth_upload:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide reference_image (or style_image/cloth_image) with an option enabled.",
+        )
+
+    try:
+        current_bytes = await _read_upload(user_image)
+        applied = []
+
+        if hair_upload is not None:
+            cloth_pipeline.unload()
+            style_bytes = await _read_upload(hair_upload)
+            hair_res = pipeline.hair_change(current_bytes, style_bytes=style_bytes)
+            current_bytes = hair_res["result_png"]
+            applied.append("hair")
+
+        if cloth_upload is not None:
+            pipeline.unload()
+            cloth_bytes = await _read_upload(cloth_upload)
+            cloth_res = cloth_pipeline.try_on(
+                current_bytes,
+                cloth_bytes,
+                category=category,
+                garment_photo_type=garment_photo_type,
+            )
+            current_bytes = cloth_res["result_png"]
+            applied.append("cloth")
+    except Exception as exc:
+        raise _handle_service_error(exc) from exc
+
+    if response_format == "png":
+        return Response(content=current_bytes, media_type="image/png")
+    return JSONResponse(
+        {
+            "applied": applied,
+            "result_png_b64": base64.b64encode(current_bytes).decode("ascii"),
         }
     )
