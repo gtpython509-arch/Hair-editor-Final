@@ -67,9 +67,14 @@ def main() -> None:
     try:
         import fashn_vton  # noqa: F401
     except ImportError:
-        _run([sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(fashn_cfg.repo_dir)])
-        # Ensure CPU onnxruntime is available for KVM 4 (no GPU)
-        _run([sys.executable, "-m", "pip", "install", "onnxruntime", "safetensors", "einops", "scipy"])
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            _run([uv_bin, "pip", "install", "--python", sys.executable, "--no-deps", "-e", str(fashn_cfg.repo_dir)])
+            _run([uv_bin, "pip", "install", "--python", sys.executable, "onnxruntime", "safetensors", "einops", "scipy", "fashn-human-parser"])
+        else:
+            _run([sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(fashn_cfg.repo_dir)])
+            # Ensure CPU onnxruntime is available for KVM 4 (no GPU)
+            _run([sys.executable, "-m", "pip", "install", "onnxruntime", "safetensors", "einops", "scipy", "fashn-human-parser"])
     if not (fashn_cfg.weights_dir / "model.safetensors").exists():
         _run(
             [
