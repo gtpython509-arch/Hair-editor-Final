@@ -15,6 +15,10 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
+from cloth_service import (
+    ClothModelNotReadyError,
+    ClothTryOnPipeline,
+)
 from hairclip_service import (
     FaceNotFoundError,
     HairCLIPPipeline,
@@ -45,6 +49,7 @@ app.add_middleware(
 )
 
 pipeline = HairCLIPPipeline()
+cloth_pipeline = ClothTryOnPipeline()
 
 
 def _require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> None:
@@ -74,7 +79,7 @@ def _handle_service_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, SessionNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, ModelNotReadyError):
+    if isinstance(exc, (ModelNotReadyError, ClothModelNotReadyError)):
         return HTTPException(status_code=503, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))
 
@@ -102,19 +107,37 @@ _HOME_HTML = """<!doctype html>
     <p id="healthStatus" style="font-size:13px;color:#94a3b8">Checking model status...</p>
   </div>
   <div class="card">
-    <h3>Hair Change (<code>POST /api/v1/hair-change</code>)</h3>
+    <h3>1. Hair Change (<code>POST /api/v1/hair-change</code>)</h3>
     <div class="row">
-      <label>1. User Image <input id="userImg" type="file" accept="image/*" /></label>
-      <label>2. Style Image <input id="styleImg" type="file" accept="image/*" /></label>
+      <label>User Image <input id="userImg" type="file" accept="image/*" /></label>
+      <label>Style Image <input id="styleImg" type="file" accept="image/*" /></label>
       <button id="go">Run Hair Change</button>
     </div>
     <p id="msg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
     <img id="out" />
   </div>
+  <div class="card">
+    <h3>2. Cloth Change (<code>POST /api/v1/cloth-change</code>)</h3>
+    <div class="row">
+      <label>User Image <input id="clothUserImg" type="file" accept="image/*" /></label>
+      <label>Cloth Image <input id="clothImg" type="file" accept="image/*" /></label>
+      <label>Category
+        <select id="clothCat" style="padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#f8fafc">
+          <option value="tops">tops</option>
+          <option value="bottoms">bottoms</option>
+          <option value="one-pieces">one-pieces</option>
+        </select>
+      </label>
+      <button id="goCloth">Run Cloth Change</button>
+    </div>
+    <p id="clothMsg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
+    <img id="clothOut" />
+  </div>
   <script>
     fetch('/health').then(r => r.json()).then(d => {
       document.getElementById('healthStatus').textContent =
-        d.ready ? 'Models ready.' : 'Models not downloaded yet (run python setup_models.py).';
+        'Hair model: ' + (d.hair?.ready ? 'ready' : 'not installed') +
+        ' | Cloth model: ' + (d.cloth?.ready ? 'ready' : 'not installed');
     });
     document.getElementById('go').onclick = async () => {
       const u = document.getElementById('userImg').files[0];
@@ -124,10 +147,25 @@ _HOME_HTML = """<!doctype html>
       const fd = new FormData();
       fd.append('user_image', u);
       fd.append('style_image', s);
-      msg.textContent = 'Running...';
+      msg.textContent = 'Running hair change...';
       const r = await fetch('/api/v1/hair-change?response_format=png', { method: 'POST', body: fd });
       if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
       document.getElementById('out').src = URL.createObjectURL(await r.blob());
+      msg.textContent = 'Done.';
+    };
+    document.getElementById('goCloth').onclick = async () => {
+      const u = document.getElementById('clothUserImg').files[0];
+      const c = document.getElementById('clothImg').files[0];
+      const msg = document.getElementById('clothMsg');
+      if (!u || !c) { msg.textContent = 'Select both User Image and Cloth Image.'; return; }
+      const fd = new FormData();
+      fd.append('user_image', u);
+      fd.append('cloth_image', c);
+      fd.append('category', document.getElementById('clothCat').value);
+      msg.textContent = 'Running cloth change (CPU may take 1-3 min)...';
+      const r = await fetch('/api/v1/cloth-change?response_format=png', { method: 'POST', body: fd });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
+      document.getElementById('clothOut').src = URL.createObjectURL(await r.blob());
       msg.textContent = 'Done.';
     };
   </script>
@@ -144,9 +182,16 @@ def home() -> str:
 
 @app.get("/health")
 def health() -> dict:
-    """Check service readiness, downloaded weights, and loaded models."""
-    status = pipeline.readiness()
-    return {"status": "ok" if status["ready"] else "models_missing", **status}
+    """Check readiness for both HairCLIP (hair) and FASHN VTON v1.5 (cloth)."""
+    hair = pipeline.readiness()
+    cloth = cloth_pipeline.readiness()
+    ready = hair["ready"] and cloth["ready"]
+    return {
+        "status": "ok" if ready else "partial_or_missing",
+        "ready": ready,
+        "hair": hair,
+        "cloth": cloth,
+    }
 
 
 @app.post("/api/v1/style/check", dependencies=[Depends(_require_api_key)])
@@ -266,5 +311,47 @@ async def hair_change(
             "hair_fraction": res["hair_fraction"],
             "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
             "comparison_png_b64": base64.b64encode(res["comparison_png"]).decode("ascii"),
+        }
+    )
+
+
+@app.post("/api/v1/cloth-change", dependencies=[Depends(_require_api_key)])
+async def cloth_change(
+    user_image: UploadFile = File(..., description="Person portrait/full-body image"),
+    cloth_image: UploadFile = File(..., description="Garment photo (model or flat-lay)"),
+    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
+    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
+    num_timesteps: int = Form(20, ge=10, le=50),
+    guidance_scale: float = Form(1.5, ge=1.0, le=3.0),
+    seed: int = Form(42),
+    segmentation_free: bool = Form(True),
+    response_format: Literal["png", "json"] = Query("png"),
+):
+    """Virtual try-on: render `user_image` wearing `cloth_image` using FASHN VTON v1.5."""
+    try:
+        user_bytes = await _read_upload(user_image)
+        cloth_bytes = await _read_upload(cloth_image)
+        res = cloth_pipeline.try_on(
+            user_bytes,
+            cloth_bytes,
+            category=category,
+            garment_photo_type=garment_photo_type,
+            num_timesteps=num_timesteps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+            segmentation_free=segmentation_free,
+        )
+    except Exception as exc:
+        raise _handle_service_error(exc) from exc
+
+    if response_format == "png":
+        return Response(content=res["result_png"], media_type="image/png")
+    return JSONResponse(
+        {
+            "width": res["width"],
+            "height": res["height"],
+            "category": res["category"],
+            "garment_photo_type": res["garment_photo_type"],
+            "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
         }
     )

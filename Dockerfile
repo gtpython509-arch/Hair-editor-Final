@@ -10,11 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY hairclip_service.py api.py setup_models.py ./
+COPY hairclip_service.py cloth_service.py api.py setup_models.py ./
 
 ENV HAIRCLIP_BASE_DIR=/app \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-CMD ["sh", "-c", "python setup_models.py && exec uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1"]
+CMD ["sh", "-c", "python setup_models.py && exec uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 300"]

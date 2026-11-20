@@ -5,11 +5,13 @@ from __future__ import annotations
 import bz2
 import shutil
 import subprocess
+import sys
 import urllib.request
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download
 
+from cloth_service import ClothTryOnConfig
 from hairclip_service import HairCLIPConfig
 
 
@@ -57,7 +59,28 @@ def main() -> None:
     import clip
     clip.load("ViT-B/32", device="cpu", jit=False)
 
-    print("Setup complete. Weights directory:", cfg.weights_dir)
+    # FASHN VTON v1.5 (cloth-change model)
+    fashn_cfg = ClothTryOnConfig.from_env()
+    fashn_cfg.weights_dir.mkdir(parents=True, exist_ok=True)
+    if not fashn_cfg.repo_dir.exists():
+        _run(["git", "clone", "https://github.com/fashn-AI/fashn-vton-1.5.git", str(fashn_cfg.repo_dir)])
+    try:
+        import fashn_vton  # noqa: F401
+    except ImportError:
+        _run([sys.executable, "-m", "pip", "install", "--no-deps", "-e", str(fashn_cfg.repo_dir)])
+        # Ensure CPU onnxruntime is available for KVM 4 (no GPU)
+        _run([sys.executable, "-m", "pip", "install", "onnxruntime", "safetensors", "einops", "scipy"])
+    if not (fashn_cfg.weights_dir / "model.safetensors").exists():
+        _run(
+            [
+                sys.executable,
+                str(fashn_cfg.repo_dir / "scripts" / "download_weights.py"),
+                "--weights-dir",
+                str(fashn_cfg.weights_dir),
+            ]
+        )
+
+    print("Setup complete. Weights directory:", cfg.weights_dir, "| FASHN:", fashn_cfg.weights_dir)
 
 
 if __name__ == "__main__":

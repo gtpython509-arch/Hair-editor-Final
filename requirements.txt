@@ -10,4 +10,8 @@ dlib-bin>=19.24.2
 ftfy>=6.1.1
 regex>=2023.0.0
 huggingface-hub>=0.23.0
+safetensors>=0.4.0
+einops>=0.7.0
+onnxruntime>=1.17.0
+scipy>=1.11.0
 git+https://github.com/openai/CLIP.git
