@@ -15,10 +15,6 @@ from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from cloth_service import (
-    ClothModelNotReadyError,
-    ClothTryOnPipeline,
-)
 from hairclip_service import (
     FaceNotFoundError,
     HairCLIPPipeline,
@@ -49,7 +45,6 @@ app.add_middleware(
 )
 
 pipeline = HairCLIPPipeline()
-cloth_pipeline = ClothTryOnPipeline()
 
 
 def _require_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> None:
@@ -79,7 +74,7 @@ def _handle_service_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, SessionNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
-    if isinstance(exc, (ModelNotReadyError, ClothModelNotReadyError)):
+    if isinstance(exc, ModelNotReadyError):
         return HTTPException(status_code=503, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))
 
@@ -101,26 +96,17 @@ _HOME_HTML = """<!doctype html>
   </style>
 </head>
 <body>
-  <h2>Hair &amp; Cloth Editor API</h2>
+  <h2>HairCLIP v3 Hair Change API</h2>
   <div class="card">
     <p>Swagger Docs: <a href="/docs">/docs</a> &nbsp;|&nbsp; Health: <a href="/health">/health</a></p>
     <p id="healthStatus" style="font-size:13px;color:#94a3b8">Checking model status...</p>
   </div>
   <div class="card">
-    <h3>Unified Editor (<code>POST /api/v1/try-on</code>)</h3>
-    <p style="font-size:13px;color:#94a3b8;margin-top:0">Upload <b>User Image</b> plus either <b>Style Image</b> (hair), <b>Cloth Image</b> (outfit), or <b>both</b>.</p>
+    <h3>Hair Change (<code>POST /api/v1/hair-change</code>)</h3>
     <div class="row">
-      <label>User Image (required) <input id="userImg" type="file" accept="image/*" /></label>
-      <label>Hair Style Image (optional) <input id="styleImg" type="file" accept="image/*" /></label>
-      <label>Cloth Image (optional) <input id="clothImg" type="file" accept="image/*" /></label>
-      <label>Cloth Category
-        <select id="clothCat" style="padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#f8fafc">
-          <option value="tops">tops</option>
-          <option value="bottoms">bottoms</option>
-          <option value="one-pieces">one-pieces</option>
-        </select>
-      </label>
-      <button id="go">Apply Changes</button>
+      <label>1. User Image <input id="userImg" type="file" accept="image/*" /></label>
+      <label>2. Style Image <input id="styleImg" type="file" accept="image/*" /></label>
+      <button id="go">Run Hair Change</button>
     </div>
     <p id="msg" style="font-size:13px;color:#94a3b8;margin-top:10px"></p>
     <img id="out" />
@@ -128,23 +114,18 @@ _HOME_HTML = """<!doctype html>
   <script>
     fetch('/health').then(r => r.json()).then(d => {
       document.getElementById('healthStatus').textContent =
-        'Hair model: ' + (d.hair?.ready ? 'ready' : 'not installed') +
-        ' | Cloth model: ' + (d.cloth?.ready ? 'ready' : 'not installed');
+        d.ready ? 'Models ready.' : 'Models not downloaded yet (run python setup_models.py).';
     });
     document.getElementById('go').onclick = async () => {
       const u = document.getElementById('userImg').files[0];
       const s = document.getElementById('styleImg').files[0];
-      const c = document.getElementById('clothImg').files[0];
       const msg = document.getElementById('msg');
-      if (!u) { msg.textContent = 'Select a User Image first.'; return; }
-      if (!s && !c) { msg.textContent = 'Select a Hair Style Image, a Cloth Image, or both.'; return; }
+      if (!u || !s) { msg.textContent = 'Select both User Image and Style Image.'; return; }
       const fd = new FormData();
       fd.append('user_image', u);
-      if (s) fd.append('style_image', s);
-      if (c) fd.append('cloth_image', c);
-      fd.append('category', document.getElementById('clothCat').value);
-      msg.textContent = 'Processing... (CPU may take 1-3 min)';
-      const r = await fetch('/api/v1/try-on?response_format=png', { method: 'POST', body: fd });
+      fd.append('style_image', s);
+      msg.textContent = 'Running...';
+      const r = await fetch('/api/v1/hair-change?response_format=png', { method: 'POST', body: fd });
       if (!r.ok) { const e = await r.json().catch(() => ({})); msg.textContent = 'Error: ' + (e.detail || r.status); return; }
       document.getElementById('out').src = URL.createObjectURL(await r.blob());
       msg.textContent = 'Done.';
@@ -163,16 +144,9 @@ def home() -> str:
 
 @app.get("/health")
 def health() -> dict:
-    """Check readiness for both HairCLIP (hair) and FASHN VTON v1.5 (cloth)."""
-    hair = pipeline.readiness()
-    cloth = cloth_pipeline.readiness()
-    ready = hair["ready"] and cloth["ready"]
-    return {
-        "status": "ok" if ready else "partial_or_missing",
-        "ready": ready,
-        "hair": hair,
-        "cloth": cloth,
-    }
+    """Check service readiness, downloaded weights, and loaded models."""
+    status = pipeline.readiness()
+    return {"status": "ok" if status["ready"] else "models_missing", **status}
 
 
 @app.post("/api/v1/style/check", dependencies=[Depends(_require_api_key)])
@@ -273,7 +247,6 @@ async def hair_change(
 ):
     """Transfer the hairstyle from `style_image` onto `user_image`."""
     try:
-        cloth_pipeline.unload()
         user_bytes = await _read_upload(user_image)
         style_bytes = await _read_upload(style_image)
         res = pipeline.hair_change(
@@ -293,96 +266,5 @@ async def hair_change(
             "hair_fraction": res["hair_fraction"],
             "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
             "comparison_png_b64": base64.b64encode(res["comparison_png"]).decode("ascii"),
-        }
-    )
-
-
-@app.post("/api/v1/cloth-change", dependencies=[Depends(_require_api_key)])
-async def cloth_change(
-    user_image: UploadFile = File(..., description="Person portrait/full-body image"),
-    cloth_image: UploadFile = File(..., description="Garment photo (model or flat-lay)"),
-    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
-    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
-    num_timesteps: int = Form(20, ge=10, le=50),
-    guidance_scale: float = Form(1.5, ge=1.0, le=3.0),
-    seed: int = Form(42),
-    segmentation_free: bool = Form(True),
-    response_format: Literal["png", "json"] = Query("png"),
-):
-    """Virtual try-on: render `user_image` wearing `cloth_image` using FASHN VTON v1.5."""
-    try:
-        pipeline.unload()
-        user_bytes = await _read_upload(user_image)
-        cloth_bytes = await _read_upload(cloth_image)
-        res = cloth_pipeline.try_on(
-            user_bytes,
-            cloth_bytes,
-            category=category,
-            garment_photo_type=garment_photo_type,
-            num_timesteps=num_timesteps,
-            guidance_scale=guidance_scale,
-            seed=seed,
-            segmentation_free=segmentation_free,
-        )
-    except Exception as exc:
-        raise _handle_service_error(exc) from exc
-
-    if response_format == "png":
-        return Response(content=res["result_png"], media_type="image/png")
-    return JSONResponse(
-        {
-            "width": res["width"],
-            "height": res["height"],
-            "category": res["category"],
-            "garment_photo_type": res["garment_photo_type"],
-            "result_png_b64": base64.b64encode(res["result_png"]).decode("ascii"),
-        }
-    )
-
-
-@app.post("/api/v1/try-on", dependencies=[Depends(_require_api_key)])
-async def unified_try_on(
-    user_image: UploadFile = File(..., description="User portrait/full-body image"),
-    style_image: Optional[UploadFile] = File(None, description="Optional hairstyle reference image"),
-    cloth_image: Optional[UploadFile] = File(None, description="Optional garment image"),
-    category: Literal["tops", "bottoms", "one-pieces"] = Form("tops"),
-    garment_photo_type: Literal["model", "flat-lay"] = Form("model"),
-    response_format: Literal["png", "json"] = Query("png"),
-):
-    """Unified endpoint: change hair only, cloth only, or both on the same user image."""
-    if style_image is None and cloth_image is None:
-        raise HTTPException(status_code=400, detail="Provide style_image, cloth_image, or both.")
-
-    try:
-        current_bytes = await _read_upload(user_image)
-        applied = []
-
-        if style_image is not None:
-            cloth_pipeline.unload()
-            style_bytes = await _read_upload(style_image)
-            hair_res = pipeline.hair_change(current_bytes, style_bytes=style_bytes)
-            current_bytes = hair_res["result_png"]
-            applied.append("hair")
-
-        if cloth_image is not None:
-            pipeline.unload()
-            cloth_bytes = await _read_upload(cloth_image)
-            cloth_res = cloth_pipeline.try_on(
-                current_bytes,
-                cloth_bytes,
-                category=category,
-                garment_photo_type=garment_photo_type,
-            )
-            current_bytes = cloth_res["result_png"]
-            applied.append("cloth")
-    except Exception as exc:
-        raise _handle_service_error(exc) from exc
-
-    if response_format == "png":
-        return Response(content=current_bytes, media_type="image/png")
-    return JSONResponse(
-        {
-            "applied": applied,
-            "result_png_b64": base64.b64encode(current_bytes).decode("ascii"),
         }
     )

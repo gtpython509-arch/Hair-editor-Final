@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY hairclip_service.py cloth_service.py api.py setup_models.py ./
+COPY hairclip_service.py api.py setup_models.py ./
 
 ENV HAIRCLIP_BASE_DIR=/app \
     PYTHONUNBUFFERED=1
